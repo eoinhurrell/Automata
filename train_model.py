@@ -1,64 +1,59 @@
-import torch
-from torch.utils.data import DataLoader, random_split
-from transformers import AutoTokenizer
-import numpy as np
-from tqdm import tqdm
-from sklearn.metrics import accuracy_score
 import logging
 import pickle
-from torch.optim import AdamW
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from sklearn.metrics import accuracy_score
 from torch.nn import CrossEntropyLoss
+from torch.optim import AdamW
+from torch.utils.data import DataLoader, Dataset, random_split
+from tqdm import tqdm
 
 # Import our model definition
-from transformers import AutoModelForSequenceClassification
-import torch.nn as nn
-from torch.utils.data import Dataset
+from transformers import AutoTokenizer, AutoModel
 
 
 class SequentialWorkflowClassifier(nn.Module):
-    def __init__(self, num_labels=66, max_steps=5):
+    def __init__(self, num_labels=60, max_steps=5):
         super().__init__()
         # Use DistilBERT as base model - good balance of performance and speed
-        self.bert = AutoModelForSequenceClassification.from_pretrained(
-            "distilbert-base-uncased", num_labels=num_labels
-        )
+        self.bert = AutoModel.from_pretrained("distilbert-base-uncased")
 
-        # Sequential decoder for step prediction
+        # Changed to take full sequence representation
         self.step_decoder = nn.LSTM(
             input_size=768,  # BERT hidden size
             hidden_size=256,
             num_layers=2,
             batch_first=True,
+            bidirectional=True,
         )
 
-        # Output projection for each step
+        # Adjusted for bidirectional LSTM
         self.step_projections = nn.ModuleList(
-            [nn.Linear(256, num_labels) for _ in range(max_steps)]
+            [nn.Linear(512, num_labels) for _ in range(max_steps)]
         )
 
         self.max_steps = max_steps
 
     def forward(self, input_ids, attention_mask):
-        # Get BERT embeddings
+        # Get full BERT output sequence
         bert_output = self.bert(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=True,
-        )
+        ).last_hidden_state  # [batch_size, seq_len, hidden_size]
 
-        # Use last hidden state as sequence representation
-        sequence_repr = bert_output.hidden_states[-1][:, 0, :]  # [CLS] token
+        # Process through LSTM
+        lstm_output, _ = self.step_decoder(bert_output)
 
-        # Expand to sequence length for LSTM
-        sequence_repr = sequence_repr.unsqueeze(1).repeat(1, self.max_steps, 1)
+        # Global max pooling
+        sequence_repr = torch.max(lstm_output, dim=1)[0]
 
-        # Decode steps
-        lstm_output, _ = self.step_decoder(sequence_repr)
-
-        # Project each step to label space
+        # Project each step using the pooled representation
         step_outputs = []
-        for i in range(self.max_steps):
-            step_output = self.step_projections[i](lstm_output[:, i, :])
+        for projection in self.step_projections:
+            step_output = projection(sequence_repr)
             step_outputs.append(step_output)
 
         return torch.stack(step_outputs, dim=1)
@@ -259,8 +254,6 @@ class WorkflowTrainer:
 # Example usage
 def main():
 
-    import pandas as pd
-
     workflows = pd.read_csv("./data/workflows_10000.csv")
     orig_steps = pd.read_csv("./data/workflow_steps_10000.csv")
 
@@ -317,13 +310,6 @@ def main():
     sample_text = "When I receive a Gmail message, create a Trello card"
     predictions = trainer.predict(sample_text)
     print(f"Predicted workflow steps: {predictions}")
-
-    # Load the keys
-    step_keys = pickle.load(open("./model/step_names.pickle", "rb"))
-    # Load the model
-    model = SequentialWorkflowClassifier(num_labels=66, max_steps=5)
-    model.load_state_dict(torch.load("model/model.pt"))
-    model.eval()  # Set to evaluation mode
 
 
 if __name__ == "__main__":

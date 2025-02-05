@@ -13,6 +13,9 @@ from tqdm import tqdm
 
 # Import our model definition
 from transformers import AutoTokenizer, AutoModel
+from torch.utils.tensorboard.writer import SummaryWriter
+
+writer = SummaryWriter()
 
 
 class SequentialWorkflowClassifier(nn.Module):
@@ -174,11 +177,16 @@ class WorkflowTrainer:
                 f"Val Loss: {val_loss:.3f} - "
                 f"Val Accuracy: {val_accuracy:.3f}"
             )
+            writer.add_scalar("Loss/train", train_loss, epoch)
+            writer.add_scalar("Loss/val", val_loss, epoch)
+            writer.add_scalar("Accuracy/val", val_accuracy, epoch)
 
             # Save best model
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 torch.save(self.model.state_dict(), "./model/model.pt")
+        writer.flush()
+        writer.close()
 
     def evaluate(self, dataloader):
         """Evaluate the model"""
